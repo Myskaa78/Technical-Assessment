@@ -1,3 +1,4 @@
+from contextlib import asynccontextmanager
 import ipaddress
 import logging
 import socket
@@ -8,17 +9,50 @@ from urllib.robotparser import RobotFileParser
 from bs4 import BeautifulSoup
 from fastapi import FastAPI, HTTPException, status
 import httpx
+from playwright.async_api import async_playwright, Browser, Playwright
 from pydantic import BaseModel, HttpUrl
 import trafilatura
 
-# Configuration du logging
+#config Logs
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("scraper-microservice")
+
+playwright_driver: Optional[Playwright] = None
+browser_instance: Optional[Browser] = None
+
+
+# chromium et playwright pour recuperer le JS de la page
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global playwright_driver, browser_instance
+    try:
+        playwright_driver = await async_playwright().start()
+        #set up des privilege du chromium
+        browser_instance = await playwright_driver.chromium.launch(
+            headless=True,
+            args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"],
+        )
+        logger.info("Chromium Playwright démarré avec succès pour le rendu dynamique.")
+    except Exception as exc:
+        logger.warning(f"Initialisation Playwright au démarrage échouée : {exc}")
+    yield
+    if browser_instance:
+        try:
+            await browser_instance.close()
+        except Exception:
+            pass
+    if playwright_driver:
+        try:
+            await playwright_driver.stop()
+        except Exception:
+            pass
+
 
 app = FastAPI(
     title="Web Scraper Microservice",
     description="Microservice FastAPI de web scraping haute performance avec protection SSRF et respect des robots.txt",
     version="2.0.0",
+    lifespan=lifespan,
 )
 
 USER_AGENT = (
@@ -33,6 +67,7 @@ REQUEST_TIMEOUT_SECONDS = 10.0
 
 class ScrapeRequest(BaseModel):
     url: str
+    dynamic: bool = False
 
 
 class MediaImage(BaseModel):
@@ -125,7 +160,7 @@ def validate_ssrf(url_str: str) -> urllib.parse.ParseResult:
     return parsed
 
 
-# --- Verifiy robot . txt 
+# --- Étape B : Courtoisie (robots.txt) ---
 
 async def verify_robots_txt(parsed_url: urllib.parse.ParseResult, full_url: str) -> None:
     """
@@ -147,7 +182,6 @@ async def verify_robots_txt(parsed_url: urllib.parse.ParseResult, full_url: str)
             res = await client.get(robots_url)
             if res.status_code == 200:
                 rfp.parse(res.text.splitlines())
-                
             elif res.status_code in (401, 403):
                 rfp.disallow_all = True
             else:
@@ -173,6 +207,50 @@ def health_check():
     return {"status": "ok", "service": "scraper", "version": "2.0.0"}
 
 
+# rendu dynamique playwright chronium
+
+async def render_dynamic_page(url: str, timeout_seconds: float = 15.0) -> tuple[str, str]:
+    """
+    ON recuperer le JS de la page via le navigateur Chromium 
+    Retourne (html_rendu, final_url)
+    """
+    global browser_instance, playwright_driver
+    if not browser_instance:
+        playwright_driver = await async_playwright().start()
+        browser_instance = await playwright_driver.chromium.launch(
+            headless=True,
+            args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"],
+        )
+
+    # playwright new window without cache or cookie 
+    context = await browser_instance.new_context(
+        user_agent=USER_AGENT,
+        locale="fr-FR",
+    )
+    try:
+        page = await context.new_page()
+        timeout_ms = int(timeout_seconds * 1000)
+        try:
+            await page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
+        except Exception as exc:
+            raise HTTPException(
+                status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+                detail=f"Délai d'attente dépassé lors du rendu JavaScript ({timeout_seconds}s) : {str(exc)}",
+            )
+
+        try:
+            await page.wait_for_load_state("networkidle", timeout=3000)
+        except Exception:
+            pass
+
+        final_url = page.url
+        html = await page.content()
+        return html, final_url
+    finally:
+        await context.close()
+
+
+# extraire differnte data
 
 def extract_metadata(soup: BeautifulSoup) -> dict:
     #Extrait le Title
@@ -318,11 +396,15 @@ def extract_videos(soup: BeautifulSoup, base_url: str) -> List[Dict[str, str]]:
         if "youtube.com" in lower_url or "youtu.be" in lower_url:
             if abs_i_url not in seen_videos:
                 seen_videos.add(abs_i_url)
-                videos.append({"url": abs_i_url, "type": "youtube"})
+                videos.append({
+                    "url": abs_i_url,
+                    "type": "youtube"})
         elif "vimeo.com" in lower_url:
             if abs_i_url not in seen_videos:
                 seen_videos.add(abs_i_url)
-                videos.append({"url": abs_i_url, "type": "vimeo"})
+                videos.append({
+                    "url": abs_i_url,
+                    "type": "vimeo"})
 
     return videos
 
@@ -339,43 +421,49 @@ async def scrape(payload: ScrapeRequest):
     # Verification des droits aux scrapping dans le robot .txt
     await verify_robots_txt(parsed_url, url)
 
-    try:
-        async with httpx.AsyncClient(
-            timeout=httpx.Timeout(REQUEST_TIMEOUT_SECONDS),
-            headers={
-                "User-Agent": USER_AGENT,
-                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                "Accept-Language": "en-US,en;q=0.9,fr;q=0.8",
-            },
-            follow_redirects=True,
-        ) as client:
-            response = await client.get(url)
-    except httpx.TimeoutException:
-        raise HTTPException(
-            status_code=status.HTTP_504_GATEWAY_TIMEOUT,
-            detail=f"Délai d'attente dépassé lors de la récupération de la page ({REQUEST_TIMEOUT_SECONDS}s).",
-        )
-    except httpx.RequestError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"Erreur réseau lors de la récupération de l'URL cible : {str(exc)}",
-        )
+    if payload.dynamic:
+        html, base_url = await render_dynamic_page(url, timeout_seconds=15.0)
+    else:
+        try:
+            async with httpx.AsyncClient(
+                timeout=httpx.Timeout(REQUEST_TIMEOUT_SECONDS),
+                headers={
+                    "User-Agent": USER_AGENT,
+                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                    "Accept-Language": "en-US,en;q=0.9,fr;q=0.8",
+                },
+                follow_redirects=True,
+            ) as client:
+                response = await client.get(url)
+        except httpx.TimeoutException:
+            raise HTTPException(
+                status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+                detail=f"Délai d'attente dépassé lors de la récupération de la page ({REQUEST_TIMEOUT_SECONDS}s).",
+            )
+        except httpx.RequestError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail=f"Erreur réseau lors de la récupération de l'URL cible : {str(exc)}",
+            )
 
-    if response.status_code >= 400:
-        raise HTTPException(
-            status_code=response.status_code if response.status_code < 500 else status.HTTP_502_BAD_GATEWAY,
-            detail=f"Le serveur cible a répondu avec le statut HTTP {response.status_code}.",
-        )
+        if response.status_code >= 400:
+            raise HTTPException(
+                status_code=response.status_code if response.status_code < 500 else status.HTTP_502_BAD_GATEWAY,
+                detail=f"Le serveur cible a répondu avec le statut HTTP {response.status_code}.",
+            )
 
-    # Verification du content-type text/html
-    content_type = response.headers.get("content-type", "").lower()
-    if "text/html" not in content_type:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Type de contenu non supporté : '{content_type}'. Seul 'text/html' est autorisé.",
-        )
+        # Verification du content-type text/html
+        content_type = response.headers.get("content-type", "").lower()
+        if "text/html" not in content_type:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Type de contenu non supporté : '{content_type}'. Seul 'text/html' est autorisé.",
+            )
 
-    html = response.text
+        html = response.text
+
+        #  On reprend response.url au cas ou il y aurait eu des redirections 
+        base_url = str(response.url)
 
     # extraction du contenue recuperé
 
@@ -387,11 +475,22 @@ async def scrape(payload: ScrapeRequest):
     )
     main_text = extracted_text if extracted_text else ""
 
-    # BeautifulSoup pour tranformer en arbre de donner plus facile a anviguer 
+    # si le texte est vide et on a pas de SPA on tente le rendu JS
+    if not payload.dynamic and not main_text and ('id="root"' in html or 'id="app"' in html or "javascript" in html.lower()):
+        logger.info(f"Détection d'une coquille SPA vide pour {url}, fallback automatique vers Playwright...")
+        try:
+            dyn_html, dyn_base_url = await render_dynamic_page(url, timeout_seconds=15.0)
+            dyn_text = trafilatura.extract(dyn_html, include_comments=False, include_tables=True)
+            if dyn_text:
+                html = dyn_html
+                base_url = dyn_base_url
+                main_text = dyn_text
+        except Exception as exc:
+            logger.warning(f"Échec du fallback dynamique pour {url}: {exc}")
+
+    # BeautifulSoup pour tranformer en arbre de donner plus facile a naviguer 
     soup = BeautifulSoup(html, "lxml")
 
-    #  On reprend response.url au cas ou il y aurait eu des redirections 
-    base_url = str(response.url)
     base_tag = soup.find("base", href=True)
     # si le site a mis en place la balise Base on l utilsie
     if base_tag:
