@@ -126,7 +126,7 @@ SCRAPER_URL=http://localhost:8000/scrape
 # 86400000 = 24 heures
 CACHE_TTL_MS=3600000
 
----
+```
 
 ## Structure des fichiers
 
