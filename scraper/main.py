@@ -125,7 +125,7 @@ def validate_ssrf(url_str: str) -> urllib.parse.ParseResult:
     return parsed
 
 
-# --- Étape B : Courtoisie (robots.txt) ---
+# --- Verifiy robot . txt 
 
 async def verify_robots_txt(parsed_url: urllib.parse.ParseResult, full_url: str) -> None:
     """
@@ -173,7 +173,6 @@ def health_check():
     return {"status": "ok", "service": "scraper", "version": "2.0.0"}
 
 
-# --- Fonctions pures d'extraction HTML (Clean Code & SRP) ---
 
 def extract_metadata(soup: BeautifulSoup) -> dict:
     #Extrait le Title
@@ -328,7 +327,7 @@ def extract_videos(soup: BeautifulSoup, base_url: str) -> List[Dict[str, str]]:
     return videos
 
 
-# - Route Principale POST /scrape ---
+# - Route Post de scrape
 
 @app.post("/scrape", response_model=ScrapeResponse)
 async def scrape(payload: ScrapeRequest):
@@ -380,7 +379,6 @@ async def scrape(payload: ScrapeRequest):
 
     # extraction du contenue recuperé
 
-    #
     # trafilatura pour supprimer le bruit de la page 
     extracted_text = trafilatura.extract(
         html,
