@@ -109,6 +109,22 @@ Vérifie la sécurité SSRF, le rejet des URLs invalides, l'extraction des méta
 cd scraper
 ./venv/bin/python -m unittest test_scraper.py
 ```
+## ⚙️ Configuration (Variables d'environnement)
+
+Pour faire fonctionner le projet, créez un fichier `.env` à la racine  et définissez les variables suivantes :
+
+```env
+# Port de l'API Gateway NestJS & Frontend
+PORT=3000
+
+# URL interne du microservice de scraping Python
+SCRAPER_URL=http://localhost:8000/scrape
+
+# Durée d'expiration du cache en millisecondes (TTL)
+# 3600000 = 1 heure (valeur par défaut)
+# 60000 = 1 minute
+# 86400000 = 24 heures
+CACHE_TTL_MS=3600000
 
 ---
 
