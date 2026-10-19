@@ -1,4 +1,4 @@
-# Web Scraping & Data Ingestion — Everdian Technical Assessment
+# Web Scraping & Data Ingestion —  Technical Assessment
 
 Ce projet propose un service de web scraping et d'ingestion de données structurées, conçu pour tourner localement sans Docker avec **Node.js** et **Python**.
 
