@@ -1,4 +1,4 @@
-import { IsNotEmpty, IsUrl } from 'class-validator';
+import { IsNotEmpty, IsUrl, IsOptional, IsBoolean } from 'class-validator';
 
 export class ExtractDto {
   @IsNotEmpty({ message: "L'URL est requise." })
@@ -7,5 +7,8 @@ export class ExtractDto {
     { message: "L'URL doit être valide et débuter par http:// ou https://." },
   )
   url: string;
-}
 
+  @IsOptional()
+  @IsBoolean({ message: 'Le paramètre dynamic doit être un booléen.' })
+  dynamic?: boolean;
+}

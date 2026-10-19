@@ -18,6 +18,7 @@
       --error-text: #f87171;
       --success-badge: #10b981;
       --info-badge: #0ea5e9;
+      --purple-badge: #a855f7;
     }
 
     * {
@@ -195,6 +196,12 @@
       border: 1px solid rgba(14, 165, 233, 0.4);
     }
 
+    .badge-dynamic {
+      background-color: rgba(168, 85, 247, 0.2);
+      color: var(--purple-badge);
+      border: 1px solid rgba(168, 85, 247, 0.4);
+    }
+
     .badge-duration {
       color: var(--text-muted);
       font-size: 0.8rem;
@@ -243,7 +250,7 @@
   <div class="container">
     <header>
       <h1>Web Scraper Service</h1>
-      <p>NestJS API Gateway, Service Python </p>
+      <p>NestJS API Gateway • Rendu JavaScript Automatique (Headless Chromium / SPA)</p>
     </header>
 
     <!-- Extraction Form -->
@@ -278,10 +285,11 @@
         <span class="result-title">Résultat JSON</span>
         <div class="status-badges">
           <span id="duration-badge" class="badge-duration"></span>
+          <span id="mode-badge" class="badge badge-dynamic" style="display: none;">JS RENDERED</span>
           <span id="cache-badge" class="badge" style="display: none;"></span>
         </div>
       </div>
-      <pre><code id="json-result" class="empty-state">Entrez une URL et cliquez sur "Extract" pour lancer le scraping...</code></pre>
+      <pre><code id="json-result" class="empty-state">Entrez une URL et cliquez sur "Extract" pour lancer le scraping automatique...</code></pre>
     </div>
   </div>
 
@@ -295,6 +303,7 @@
     const errorMessage = document.getElementById('error-message');
     const jsonResult = document.getElementById('json-result');
     const cacheBadge = document.getElementById('cache-badge');
+    const modeBadge = document.getElementById('mode-badge');
     const durationBadge = document.getElementById('duration-badge');
 
     function setLoading(isLoading) {
@@ -303,9 +312,10 @@
         btnSpinner.style.display = 'inline-block';
         btnText.textContent = 'Loading...';
         jsonResult.className = 'empty-state';
-        jsonResult.textContent = 'Chargement des données en cours...';
+        jsonResult.textContent = 'Chargement de la page et exécution du JavaScript...';
         hideError();
         cacheBadge.style.display = 'none';
+        modeBadge.style.display = 'none';
         durationBadge.textContent = '';
       } else {
         submitBtn.disabled = false;
@@ -333,12 +343,13 @@
       const startTime = performance.now();
 
       try {
+        // Le rendu JavaScript dynamique est activé d'emblée par défaut
         const response = await fetch('/api/extract', {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
           },
-          body: JSON.stringify({ url }),
+          body: JSON.stringify({ url, dynamic: true }),
         });
 
         const elapsed = Math.round(performance.now() - startTime);
@@ -360,13 +371,24 @@
         jsonResult.className = '';
         jsonResult.textContent = JSON.stringify(data, null, 2);
 
+        // Badge du mode de rendu
+        modeBadge.style.display = 'inline-block';
+        if (data.dynamic === true) {
+          modeBadge.className = 'badge badge-dynamic';
+          modeBadge.textContent = ' JS RENDERED';
+        } else {
+          modeBadge.className = 'badge badge-cache-miss';
+          modeBadge.textContent = ' FAST HTTP';
+        }
+
+        // Badge du statut de cache
         cacheBadge.style.display = 'inline-block';
         if (data.cached === true) {
           cacheBadge.className = 'badge badge-cache-hit';
           cacheBadge.textContent = 'CACHE HIT';
         } else {
           cacheBadge.className = 'badge badge-cache-miss';
-          cacheBadge.textContent = ' CACHE MISS';
+          cacheBadge.textContent = 'CACHE MISS';
         }
 
       } catch (err) {
@@ -382,4 +404,3 @@
   </script>
 </body>
 </html>
-

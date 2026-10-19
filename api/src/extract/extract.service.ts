@@ -11,19 +11,37 @@ import { Cache } from 'cache-manager';
 import { firstValueFrom } from 'rxjs';
 import { ExtractDto } from './dto/extract.dto';
 
+export interface MediaImage {
+  url: string;
+  alt?: string | null;
+}
+
+export interface MediaVideo {
+  url: string;
+  type: string;
+}
+
+export interface ScrapeMetadata {
+  author?: string | null;
+  publishedAt?: string | null;
+  language?: string | null;
+  [key: string]: any;
+}
+
 export interface ScraperResponse {
   url: string;
-  title: string;
-  description: string;
+  title?: string | null;
+  description?: string | null;
   text: string;
-  images: string[];
-  videos: string[];
-  metadata: Record<string, any>;
+  images: MediaImage[];
+  videos: MediaVideo[];
+  metadata: ScrapeMetadata;
 }
 
 export interface ExtractResult extends ScraperResponse {
   extractedAt: string;
   cached: boolean;
+  dynamic?: boolean;
 }
 
 @Injectable()
@@ -31,40 +49,45 @@ export class ExtractService {
   private readonly logger = new Logger(ExtractService.name);
   private readonly scraperServiceUrl =
     process.env.SCRAPER_URL || 'http://localhost:8000/scrape';
-  // Cache de 1 heure 
-  private readonly cacheTtlMs = 60 * 60 * 1000;
+  // Cache TTL configurable via variable d'environnement (défaut : 1h = 3600000 ms)
+  private readonly cacheTtlMs = parseInt(
+    process.env.CACHE_TTL_MS || '3600000',
+    10,
+  );
 
   constructor(
     private readonly httpService: HttpService,
     @Inject(CACHE_MANAGER) private readonly cacheManager: Cache,
   ) {}
 
-
-  // verification si l'url est deja enregistrer dans le cache 
   async extract(extractDto: ExtractDto): Promise<ExtractResult> {
     const { url } = extractDto;
+    // le rendu dynamique JS by default, si dynamic est desactiver
+    const isDynamic = extractDto.dynamic !== undefined ? Boolean(extractDto.dynamic) : true;
 
-    const cachedData = await this.cacheManager.get<ExtractResult>(url);
+    const cacheKey = `${url}:dynamic=${isDynamic}`;
+
+    const cachedData = await this.cacheManager.get<ExtractResult>(cacheKey);
     if (cachedData) {
-      this.logger.log(`Cache HIT pour: ${url}`);
+      this.logger.log(`Cache HIT pour: ${cacheKey}`);
       return {
         ...cachedData,
         cached: true,
       };
     }
 
-    this.logger.log(`Cache MISS pour: ${url}. Appel vers le service Scrap (${this.scraperServiceUrl})...`);
+    this.logger.log(
+      `Cache MISS pour: ${cacheKey}. Appel vers le microservice Python (${this.scraperServiceUrl}) [dynamic=${isDynamic}]...`,
+    );
 
-
-    // Call vers axios pour le scrap service
-
+    const requestTimeout = isDynamic ? 25000 : 15000;
     let scraperData: ScraperResponse;
     try {
       const response = await firstValueFrom(
         this.httpService.post<ScraperResponse>(
           this.scraperServiceUrl,
-          { url },
-          { timeout: 5000 },
+          { url, dynamic: isDynamic },
+          { timeout: requestTimeout },
         ),
       );
       scraperData = response.data;
@@ -72,11 +95,26 @@ export class ExtractService {
       this.logger.error(
         `Erreur lors de l'appel au service Python (${this.scraperServiceUrl}): ${error.message}`,
       );
+
+      const statusFromScraper = error.response?.status;
+      const detailFromScraper = error.response?.data?.detail;
+
+      if (statusFromScraper && detailFromScraper) {
+        throw new HttpException(
+          {
+            statusCode: statusFromScraper,
+            message: detailFromScraper,
+            error: 'ScraperClientError',
+          },
+          statusFromScraper,
+        );
+      }
+
       throw new HttpException(
         {
           statusCode: HttpStatus.INTERNAL_SERVER_ERROR,
           message:
-            'Le service de scrap Python est inaccessible ou a retourné une erreur',
+            'Le microservice de scraping Python (port 8000) est inaccessible ou a retourné une erreur.',
           error: 'ScraperServiceUnavailable',
           details: error.message,
         },
@@ -89,14 +127,12 @@ export class ExtractService {
       ...scraperData,
       extractedAt,
       cached: false,
+      dynamic: isDynamic,
     };
 
-    // Save dans le cache 1h
-    await this.cacheManager.set(url, result, this.cacheTtlMs);
-    this.logger.log(`Données sauvegardées dans le cache pour: ${url} (TTL: 1h)`);
-
+    await this.cacheManager.set(cacheKey, result, this.cacheTtlMs);
+    this.logger.log(`Données sauvegardées dans le cache pour: ${cacheKey} (TTL: 1h)`);
 
     return result;
   }
 }
-
